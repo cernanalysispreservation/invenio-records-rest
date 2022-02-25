@@ -14,11 +14,9 @@ information on how to specify aggregations and filters.
 
 from __future__ import absolute_import, print_function
 
-from elasticsearch_dsl import Q
-from elasticsearch_dsl.query import Range
 from flask import current_app, request
 from invenio_rest.errors import FieldError, RESTValidationError
-from six import text_type
+from invenio_search.engine import dsl
 from werkzeug.datastructures import MultiDict
 
 from invenio_records_rest.utils import make_comma_list_a_list
@@ -31,7 +29,7 @@ def terms_filter(field):
     :returns: Function that returns the Terms query.
     """
     def inner(values):
-        return Q('terms', **{field: values})
+        return dsl.Q('terms', **{field: values})
     return inner
 
 
@@ -76,7 +74,7 @@ def range_filter(field, start_date_math=None, end_date_math=None, **kwargs):
         args = kwargs.copy()
         args.update(range_args)
 
-        return Range(**{field: args})
+        return dsl.query.Range(**{field: args})
 
     return inner
 
@@ -85,7 +83,7 @@ def _create_filter_dsl(urlkwargs, definitions):
     """Create a filter DSL expression."""
     filters = []
     for name, filter_factory in definitions.items():
-        values = request.values.getlist(name, type=text_type)
+        values = request.values.getlist(name)
         if values:
             filters.append(filter_factory(values))
             for v in values:

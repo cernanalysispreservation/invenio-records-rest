@@ -15,8 +15,6 @@ import uuid
 from collections import defaultdict
 from functools import partial, wraps
 
-from elasticsearch import VERSION as ES_VERSION
-from elasticsearch.exceptions import RequestError
 from flask import Blueprint, abort, current_app, jsonify, make_response, \
     request, url_for
 from flask.views import MethodView
@@ -29,6 +27,7 @@ from invenio_records.api import Record
 from invenio_rest import ContentNegotiatedMethodView
 from invenio_rest.decorators import require_content_types
 from invenio_search import RecordsSearch
+from invenio_search.engine import search as search_engine
 from jsonpatch import JsonPatchException, JsonPointerException
 from jsonschema.exceptions import ValidationError
 from sqlalchemy.exc import SQLAlchemyError
@@ -42,16 +41,14 @@ from .errors import InvalidDataRESTError, InvalidQueryRESTError, \
     JSONSchemaValidationError, PatchJSONFailureRESTError, \
     PIDResolveRESTError, SearchPaginationRESTError, \
     SuggestMissingContextRESTError, SuggestNoCompletionsRESTError, \
-    UnhandledElasticsearchError, UnsupportedMediaRESTError
+    UnsupportedMediaRESTError,  UnhandledSearchError
 from .links import default_links_factory
 from .proxies import current_records_rest
 from .query import es_search_factory
 from .utils import obj_or_import_string
 
-lt_es7 = ES_VERSION[0] < 7
 
-
-def elasticsearch_query_parsing_exception_handler(error):
+def search_query_parsing_exception_handler(error):
     """Handle query parsing exceptions from ElasticSearch."""
     description = _('The syntax of the search query is invalid.')
     return InvalidQueryRESTError(description=description).get_response()
@@ -90,11 +87,11 @@ def create_error_handlers(blueprint, error_handlers_registry=None):
         """Catch validation errors."""
         return JSONSchemaValidationError(error=error).get_response()
 
-    @blueprint.errorhandler(RequestError)
-    def elasticsearch_badrequest_error(error):
-        """Catch errors of ElasticSearch."""
+    @blueprint.errorhandler(search_engine.RequestError)
+    def search_badrequest_error(error):
+        """Catch errors of Search engine."""
         handlers = current_app.config[
-            'RECORDS_REST_ELASTICSEARCH_ERROR_HANDLERS']
+            'RECORDS_REST_SEARCH_ERROR_HANDLERS']
         cause_types = {c['type'] for c in error.info['error']['root_cause']}
 
         for cause_type, handler in handlers.items():
@@ -102,7 +99,7 @@ def create_error_handlers(blueprint, error_handlers_registry=None):
                 return handler(error)
 
         # Default exception for unhandled errors
-        exception = UnhandledElasticsearchError()
+        exception = UnhandledSearchError()
         current_app.logger.exception(error)  # Log the original stacktrace
         return exception.get_response()
 
@@ -178,7 +175,7 @@ def create_url_rules(endpoint, list_route=None, item_route=None,
                      indexer_class=RecordIndexer,
                      search_serializers=None,
                      search_serializers_aliases=None,
-                     search_index=None, search_type=None,
+                     search_index=None,
                      default_media_type=None,
                      max_result_window=None, use_options_view=True,
                      search_factory_imp=None, links_factory_imp=None,
@@ -224,7 +221,6 @@ def create_url_rules(endpoint, list_route=None, item_route=None,
         query arg (see `config.REST_MIMETYPE_QUERY_ARG_NAME`) to valid
         mimetypes for records search serializers: dict(alias -> mimetype).
     :param search_index: Name of the search index used when searching records.
-    :param search_type: Name of the search type used when searching records.
     :param default_media_type: Default media type for both records and search.
     :param max_result_window: Maximum number of results that Elasticsearch can
         provide for the given search index without use of scroll. This value
@@ -286,11 +282,6 @@ def create_url_rules(endpoint, list_route=None, item_route=None,
         search_class_kwargs['index'] = search_index
     else:
         search_index = search_class.Meta.index
-
-    if search_type:
-        search_class_kwargs['doc_type'] = search_type
-    else:
-        search_type = search_class.Meta.doc_types
 
     if search_class_kwargs:
         search_class = partial(search_class, **search_class_kwargs)
@@ -616,8 +607,7 @@ class RecordsListResource(ContentNegotiatedMethodView):
         search_obj = self.search_class()
         search = search_obj.with_preference_param().params(version=True)
         search = search[pagination['from_idx']:pagination['to_idx']]
-        if not lt_es7:
-            search = search.extra(track_total_hits=True)
+
 
         search, qs_kwargs = self.search_factory(search)
         urlkwargs.update(qs_kwargs)
@@ -626,8 +616,7 @@ class RecordsListResource(ContentNegotiatedMethodView):
         search_result = search.execute()
 
         # Generate links for self/prev/next
-        total = search_result.hits.total if lt_es7 else \
-            search_result.hits.total['value']
+        total = search_result.hits.total.value
         endpoint = '.{0}_list'.format(
             current_records_rest.default_endpoint_prefixes[self.pid_type])
         urlkwargs.update(size=pagination['size'], _external=True)
@@ -942,22 +931,13 @@ class SuggestResource(MethodView):
         # Add completions
         s = self.search_class()
         for field, val, opts in completions:
-            source = opts.pop('_source', None)
-            if source is not None and ES_VERSION[0] >= 5:
+            source = opts.pop("_source", None)
+            if source is not None:
                 s = s.source(source).suggest(field, val, **opts)
             else:
                 s = s.suggest(field, val, **opts)
 
-        if ES_VERSION[0] == 2:
-            # Execute search
-            response = s.execute_suggest().to_dict()
-            for field, _, _ in completions:
-                for resp in response[field]:
-                    for op in resp['options']:
-                        if 'payload' in op:
-                            op['_source'] = copy.deepcopy(op['payload'])
-        elif ES_VERSION[0] >= 5:
-            response = s.execute().to_dict()['suggest']
+        response = s.execute().to_dict()['suggest']
 
         result = dict()
         for field, val, opts in completions:

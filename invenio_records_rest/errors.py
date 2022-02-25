@@ -197,9 +197,8 @@ class JSONSchemaValidationError(RESTValidationError):
             error.message if error else '')
 
 
-class UnhandledElasticsearchError(RESTException):
+class UnhandledSearchError(RESTException):
     """Failed to handle exception."""
 
     code = 500
-    description = 'An internal server error occurred when handling the ' \
-                  'request.'
+    description = "An internal server error occurred when handling the request."

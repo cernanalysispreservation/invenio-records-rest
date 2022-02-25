@@ -10,6 +10,8 @@
 
 from __future__ import absolute_import, print_function
 
+import warnings
+
 from werkzeug.utils import cached_property
 
 from . import config
@@ -102,7 +104,7 @@ class InvenioRecordsREST(object):
             if k.startswith('RECORDS_REST_'):
                 app.config.setdefault(k, getattr(config, k))
 
-        # Resolve the Elasticsearch error handlers
-        handlers = app.config['RECORDS_REST_ELASTICSEARCH_ERROR_HANDLERS']
-        for k, v in handlers.items():
-            handlers[k] = obj_or_import_string(v)
+        # Resolve the search error handlers
+        error_handlers = app.config.get("RECORDS_REST_SEARCH_ERROR_HANDLERS", {})
+        for k, v in error_handlers.items():
+            error_handlers[k] = obj_or_import_string(v)
